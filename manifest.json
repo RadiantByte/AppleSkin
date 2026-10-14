@@ -1,0 +1,12 @@
+{
+  "type": "preload-native",
+  "name": "AppleSkin",
+  "author": "TheRealBatu & MrPokeG",
+  "description": "Pulsing food and healing previews, saturation outlines, optional exhaustion, food tooltips.",
+  "version": "1.0.0",
+  "license": "GPL-3.0-only",
+  "entry": "libappleskin.so",
+  "icon": "icon.png",
+  "overwrite_files": ["icon.png"],
+  "minecraft_versions": ["1.26.52*", "26.52*"]
+}

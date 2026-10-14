@@ -1,0 +1,10 @@
+{
+    global:
+        PLMod_Load;
+        PLMod_Enable;
+        PLMod_Disable;
+        PLMod_Unload;
+        PLGetModRegistration;
+    local:
+        *;
+};
