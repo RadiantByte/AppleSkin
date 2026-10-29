@@ -8,18 +8,13 @@ bool Host::connect() {
     if (!handle) return false;
     hook = reinterpret_cast<Hook>(dlsym(handle, "_ZN2pl6memory4hookEPvS1_PS1_NS0_12HookPriorityE"));
     unhook = reinterpret_cast<Unhook>(dlsym(handle, "_ZN2pl6memory6unhookEPvS1_"));
-    resolveVtable = reinterpret_cast<VtableLookupFn>(dlsym(handle,
-        "_ZN2pl6memory21resolveVtableFunctionENSt6__ndk117basic_string_viewIcNS1_11char_traitsIcEEEEmS5_"));
     if (hook && unhook) return true;
     dlclose(handle);
     handle = nullptr;
     hook = nullptr;
     unhook = nullptr;
-    resolveVtable = nullptr;
     return false;
 }
-
-VtableLookupFn Host::vtableResolver() const { return resolveVtable; }
 
 bool Host::install(void* target, void* replacement, void** continuation) {
     if (!target || !replacement || !continuation || !hook || !unhook) return false;
@@ -42,7 +37,6 @@ bool Host::removeAll() {
         handle = nullptr;
         hook = nullptr;
         unhook = nullptr;
-        resolveVtable = nullptr;
     }
     return complete;
 }

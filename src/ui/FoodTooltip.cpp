@@ -56,48 +56,74 @@ void appendFoodTooltip(const void* stack, RedactableText* text) {
     if (text->hasFiltered) appendRows(text->filtered, food, options->tooltipIcons);
 }
 
-TooltipRows captureTooltipRows(void* context, void* font, const Rect& rectangle,
-    const std::string& text, int alignment, const TextStyle& style) {
+namespace {
+std::size_t skipFormatting(std::string_view text, std::size_t at, std::size_t end) {
+    while (at + 2 < end && text.substr(at, 2) == "\xc2\xa7") at += 3;
+    return at;
+}
+
+template<class Measure>
+TooltipRows captureRows(void* font, const Rect& rectangle, std::string_view text,
+    int alignment, const TextStyle& style, Measure measure) {
     TooltipRows result;
     const auto options = Settings::get().snapshot();
-    if (!options->tooltips || !options->tooltipIcons) return result;
+    if (!options->tooltips || !options->tooltipIcons || !font) return result;
+    if (alignment != 0 || !within(style.scale, 0.25f, 4) || text.size() > 16384 ||
+        (text.find(foodLabel) == text.npos && text.find(saturationLabel) == text.npos)) return result;
     result.outline = settingColor(options->saturationColor);
     result.outlineOpacity = options->saturationOpacity * 0.01f;
     result.borderWidth = options->borderWidth;
-    if (alignment != 0 || !within(style.scale, 0.25f, 4) || text.size() > 16384) return result;
-    const auto first = text.find(marker);
-    if (first == text.npos) return result;
-    const auto measure = method<float (*)(void*, void*, const std::string&, float, bool)>(context, build::slot::UiMeasureText);
     const auto height = method<float (*)(void*)>(font, build::slot::FontLineHeight);
-    if (!measure || !height) return result;
-    const auto lineHeight = height(font);
-    const auto step = lineHeight * style.scale + style.padding;
+    if (!height) return result;
+    const auto step = height(font) * style.scale + style.padding;
     if (!within(step, 4, 96)) return result;
-    auto cursor = first;
-    while (cursor != text.npos && result.count < result.rows.size()) {
-        const auto labelStart = cursor + marker.size();
-        const bool saturation = text.compare(labelStart, saturationLabel.size(), saturationLabel) == 0;
+    std::size_t lineStart = 0, line = 0;
+    while (lineStart < text.size() && result.count < result.rows.size()) {
+        const auto newline = text.find('\n', lineStart);
+        const auto lineEnd = newline == text.npos ? text.size() : newline;
+        const auto labelStart = skipFormatting(text, lineStart, lineEnd);
+        const bool saturation = text.substr(labelStart, saturationLabel.size()) == saturationLabel;
         const auto label = saturation ? saturationLabel : foodLabel;
-        if (text.compare(labelStart, label.size(), label) == 0) {
+        if (text.substr(labelStart, label.size()) == label) {
             const auto fieldStart = labelStart + label.size();
-            const auto valueStart = fieldStart + space.size() + 4;
-            float value = 0;
-            if (text.compare(fieldStart, space.size(), space) == 0 && valueStart < text.size() &&
-                parseValue(std::string_view(text).substr(valueStart), value)) {
-                const auto lineStart = cursor == 0 ? 0 : text.rfind('\n', cursor - 1) + 1;
-                const std::string prefix = text.substr(lineStart, fieldStart - lineStart);
-                const auto x = rectangle.left + measure(context, font, prefix, style.scale, style.showFormatting);
-                const auto line = std::count(text.begin(), text.begin() + cursor, '\n');
-                const auto y = rectangle.top + static_cast<float>(line) * step;
-                const auto width = measure(context, font, std::string(space), style.scale, false);
-                const auto iconSize = std::min(9.0f * style.scale, width / 10.0f);
-                if (within(x, -32768, 32768) && within(y, -32768, 32768) &&
-                    within(iconSize, 1, 36)) result.rows[result.count++] = {{x, y}, value, iconSize, saturation};
+            if (fieldStart + space.size() < lineEnd && text.substr(fieldStart, space.size()) == space) {
+                auto valueStart = fieldStart + space.size();
+                while (valueStart < lineEnd && text[valueStart] == ' ') ++valueStart;
+                valueStart = skipFormatting(text, valueStart, lineEnd);
+                float value = 0;
+                if (parseValue(text.substr(valueStart, lineEnd - valueStart), value)) {
+                    const auto x = rectangle.left + measure(text.substr(lineStart, fieldStart - lineStart));
+                    const auto y = rectangle.top + static_cast<float>(line) * step;
+                    const auto iconSize = std::min(9.0f * style.scale, measure(space) / 10.0f);
+                    if (within(x, -32768, 32768) && within(y, -32768, 32768) && within(iconSize, 1, 36))
+                        result.rows[result.count++] = {{x, y}, value, iconSize, saturation};
+                }
             }
         }
-        cursor = text.find(marker, labelStart);
+        if (newline == text.npos) break;
+        lineStart = newline + 1;
+        ++line;
     }
     return result;
+}
+}
+
+TooltipRows captureTooltipRows(void* context, void* font, const Rect& rectangle,
+    std::string_view text, int alignment, const TextStyle& style) {
+    const auto measure = method<float (*)(void*, void*, const std::string&, float, bool)>(context, build::slot::UiMeasureText);
+    if (!measure) return {};
+    return captureRows(font, rectangle, text, alignment, style, [&](std::string_view value) {
+        const std::string owned(value);
+        return measure(context, font, owned, style.scale, style.showFormatting);
+    });
+}
+
+TooltipRows captureFontTooltipRows(void* font, std::string_view text, float x, float y) {
+    const auto measure = method<float (*)(void*, std::string_view, float, bool)>(font, build::slot::FontMeasureText);
+    if (!measure) return {};
+    return captureRows(font, Rect{x, x, y, y}, text, 0, TextStyle{}, [&](std::string_view value) {
+        return measure(font, value, 1.0f, false);
+    });
 }
 
 void renderTooltipRows(void* context, const TooltipRows& rows, float alpha) {

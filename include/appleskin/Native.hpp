@@ -21,7 +21,7 @@ struct RedactableText {
     std::string filtered;
     bool hasFiltered{};
 };
-struct TextureData { std::byte client[24]; };
+struct TextureData;
 struct ResourceKey {
     int source{};
     std::string path;
@@ -42,21 +42,26 @@ using HungerFn = void (*)(void*, void*, void*, void*, int, void*);
 using HeartFn = HungerFn;
 using HoverFn = void (*)(const void*, const void*, void*, RedactableText*, bool);
 using TextFn = void (*)(void*, void*, const Rect&, std::string&, const Color&, int, float, const TextStyle&, const Caret&);
+using TextViewFn = void (*)(void*, void*, const Rect&, std::string_view, const Color&, int, float, const TextStyle&, const Caret&);
+using FontDrawFn = void (*)(void*, void*, std::string_view, float, float, const Color&, int, float, const void*, int, void*);
+using FinishFn = void (*)(void*);
 using LookupFn = const void* (*)(const void*, const void*);
 using AttributeValueFn = float (*)(const void*);
 using MeshValidFn = bool (*)(const void*);
 using ControlPositionFn = const Vec2* (*)(void*);
-using BatchFn = void (*)(void*, const void*, const void*, std::size_t, const Vec3*, float);
-using VtableLookupFn = std::uintptr_t (*)(std::string_view, std::size_t, std::string_view);
+using BatchFn = void (*)(void*, const void*, const void*, std::size_t, const Vec3*, float, const void*);
 using HasEffectFn = bool (*)(const void*, int);
 using ActorLevelFn = const void* (*)(const void*);
 using GameRuleFn = bool (*)(const void*, int, bool);
-using ExhaustionComponentFn = const void* (*)(const void*, std::uint32_t);
+using ExhaustionComponentFn = const void* (*)(const void*);
 struct Targets {
     void* hunger{};
     void* heart{};
     void* hover{};
     void* text{};
+    void* textView{};
+    void* fontDraw{};
+    void* finish{};
     LookupFn lookup{};
     AttributeValueFn value{};
     AttributeValueFn maximum{};
@@ -92,6 +97,7 @@ inline bool textureReady(const void* data) {
 }
 static_assert(sizeof(void*) == 8);
 static_assert(sizeof(std::string) == 24);
+static_assert(sizeof(std::string_view) == 16);
 static_assert(sizeof(Texture) == 32);
 static_assert(offsetof(ResourceKey, path) == 8);
 static_assert(offsetof(ResourceKey, pathHash) == 32);

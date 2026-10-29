@@ -42,7 +42,7 @@ void renderHungerOverlay(void* renderer, void* context, void* control, const Tar
             const auto mesh = base + build::field::RendererMeshes + type * build::field::MeshStride;
             const auto texture = base + build::field::RendererTextures + type * build::field::TextureStride;
             const auto data = read<const void*>(texture, 0);
-            if (count && textureReady(data) && targets.meshValid(mesh)) targets.batch(screen, mesh, texture, count, points, pulse);
+            if (count && textureReady(data) && targets.meshValid(mesh)) targets.batch(screen, mesh, texture, count, points, pulse, nullptr);
         };
         submit(2 + effect, full.data(), fullCount);
         submit(4 + effect, half.data(), halfCount);

@@ -1,4 +1,6 @@
 #include "Image.hpp"
+#include "Patterns.hpp"
+#include <android/log.h>
 #include <algorithm>
 #include <elf.h>
 #include <link.h>
@@ -6,7 +8,6 @@
 namespace appleskin {
 bool Image::locate() {
     segments.clear();
-    buildId.clear();
     dl_iterate_phdr([](dl_phdr_info* info, std::size_t, void* argument) {
         std::string_view name(info->dlpi_name ? info->dlpi_name : "");
         name.remove_prefix(name.find_last_of('/') == name.npos ? 0 : name.find_last_of('/') + 1);
@@ -17,31 +18,10 @@ bool Image::locate() {
             const auto begin = info->dlpi_addr + header.p_vaddr;
             if (header.p_type == PT_LOAD && (header.p_flags & PF_R))
                 image.segments.push_back({begin, begin + header.p_memsz, header.p_flags});
-            if (header.p_type != PT_NOTE) continue;
-            auto cursor = begin;
-            const auto end = begin + header.p_filesz;
-            while (cursor + sizeof(Elf64_Nhdr) <= end) {
-                const auto note = read<Elf64_Nhdr>(reinterpret_cast<void*>(cursor), 0);
-                cursor += sizeof(note);
-                const auto nameBytes = (static_cast<std::size_t>(note.n_namesz) + 3) & ~std::size_t(3);
-                const auto dataBytes = (static_cast<std::size_t>(note.n_descsz) + 3) & ~std::size_t(3);
-                if (nameBytes > end - cursor || dataBytes > end - cursor - nameBytes) break;
-                if (note.n_type == NT_GNU_BUILD_ID && note.n_namesz == 4 &&
-                    std::memcmp(reinterpret_cast<void*>(cursor), "GNU", 4) == 0) {
-                    const auto* bytes = reinterpret_cast<const std::uint8_t*>(cursor + nameBytes);
-                    image.buildId.assign(bytes, bytes + note.n_descsz);
-                }
-                cursor += nameBytes + dataBytes;
-            }
         }
         return 1;
     }, this);
     return !segments.empty();
-}
-
-bool Image::supported() const {
-    return buildId.size() == build::MinecraftBuildId.size() &&
-        std::equal(buildId.begin(), buildId.end(), build::MinecraftBuildId.begin());
 }
 
 bool Image::contains(std::uintptr_t address, std::size_t bytes, unsigned flags) const {
@@ -116,73 +96,187 @@ std::uintptr_t Image::addressPair(std::uintptr_t address, unsigned reg) const {
     return contains(target, 8, PF_R) ? target : 0;
 }
 
-bool Image::resolve(Targets& output, VtableLookupFn hostResolver) const {
-    if (!supported()) return false;
-    std::uintptr_t hungerTable{}, heartTable{}, delegateTable{}, itemTable{}, uiTable{};
-    if (!hostResolver) {
-        hungerTable = vtable("17HudHungerRenderer", 18);
-        heartTable = vtable("16HudHeartRenderer", 18);
-        delegateTable = vtable("23HungerAttributeDelegate", 3);
-        itemTable = vtable("4Item", 56);
-        uiTable = vtable("24MinecraftUIRenderContext", 33);
-        if (!hungerTable || !heartTable || !delegateTable || !itemTable || !uiTable) return false;
+namespace {
+struct CheckByte { std::size_t offset; std::uint8_t value; };
+struct Compiled {
+    std::vector<CheckByte> bytes;
+    std::size_t length{};
+    std::uint32_t word{};
+    std::uintptr_t match{};
+    unsigned count{};
+};
+int digit(char value) {
+    return value >= '0' && value <= '9' ? value - '0' : value - 'A' + 10;
+}
+Compiled compile(const pattern::Signature& signature) {
+    Compiled result;
+    auto text = signature.bytes;
+    while (!text.empty()) {
+        while (!text.empty() && text.front() == ' ') text.remove_prefix(1);
+        if (text.empty()) break;
+        const auto end = text.find(' ');
+        const auto token = text.substr(0, end);
+        if (token.front() != '?')
+            result.bytes.push_back({result.length,
+                static_cast<std::uint8_t>((digit(token[0]) << 4) | digit(token[1]))});
+        ++result.length;
+        if (end == text.npos) break;
+        text.remove_prefix(end + 1);
     }
-    const auto entry = [&](std::string_view type, std::uintptr_t table, std::size_t slot) {
-        if (hostResolver) return hostResolver(type, slot, "libminecraftpe.so");
+    for (const auto& byte : result.bytes)
+        if (byte.offset >= signature.anchor && byte.offset < signature.anchor + 4)
+            result.word |= static_cast<std::uint32_t>(byte.value) << ((byte.offset - signature.anchor) * 8);
+    return result;
+}
+}
+
+bool Image::signatures(std::vector<std::uintptr_t>& matches) const {
+    std::array<Compiled, pattern::Count> compiled;
+    std::vector<std::vector<std::size_t>> buckets(65536);
+    for (std::size_t index = 0; index < compiled.size(); ++index) {
+        compiled[index] = compile(pattern::Signatures[index]);
+        buckets[compiled[index].word & 0xffffu].push_back(index);
+    }
+    for (const auto& segment : segments) {
+        if (!(segment.flags & PF_X)) continue;
+        for (auto address = (segment.begin + 3) & ~std::uintptr_t(3); address + 4 <= segment.end; address += 4) {
+            const auto word = read<std::uint32_t>(reinterpret_cast<void*>(address), 0);
+            for (const auto index : buckets[word & 0xffffu]) {
+                auto& value = compiled[index];
+                const auto anchor = pattern::Signatures[index].anchor;
+                if (value.count > 1 || value.word != word || address - segment.begin < anchor) continue;
+                const auto start = address - anchor;
+                if (value.length > segment.end - start) continue;
+                bool valid = true;
+                for (const auto& byte : value.bytes)
+                    if (read<std::uint8_t>(reinterpret_cast<void*>(start), byte.offset) != byte.value) {
+                        valid = false;
+                        break;
+                    }
+                if (valid) {
+                    value.match = start;
+                    ++value.count;
+                }
+            }
+        }
+    }
+    matches.clear();
+    for (std::size_t index = 0; index < compiled.size(); ++index) {
+        if (compiled[index].count != 1) {
+            __android_log_print(ANDROID_LOG_ERROR, "AppleSkin", "Missing or ambiguous signature: %s", pattern::Signatures[index].name);
+            return false;
+        }
+        matches.push_back(compiled[index].match);
+    }
+    return true;
+}
+
+bool Image::resolve(Targets& output) const {
+    output = {};
+    using namespace pattern;
+    std::vector<std::uintptr_t> at;
+    if (!signatures(at)) return false;
+    const auto hungerTable = vtable("17HudHungerRenderer", 18);
+    const auto heartTable = vtable("16HudHeartRenderer", 18);
+    const auto itemTable = vtable("4Item", 56);
+    const auto uiTable = vtable("24MinecraftUIRenderContext", 34);
+    if (!hungerTable || !heartTable || !itemTable || !uiTable) {
+        __android_log_print(ANDROID_LOG_ERROR, "AppleSkin", "Missing or ambiguous native vtable");
+        return false;
+    }
+    const auto entry = [](std::uintptr_t table, std::size_t slot) {
         return read<std::uintptr_t>(reinterpret_cast<void*>(table), slot * 8);
     };
-    const auto tick = entry("17HudHungerRenderer", hungerTable, build::slot::HungerTick);
-    const auto render = entry("17HudHungerRenderer", hungerTable, build::slot::HungerRender);
-    const auto heartTick = entry("16HudHeartRenderer", heartTable, build::slot::HeartTick);
-    const auto heartRender = entry("16HudHeartRenderer", heartTable, build::slot::HeartRender);
-    const auto delegate = entry("23HungerAttributeDelegate", delegateTable, build::slot::HungerDelegateTick);
-    const auto hover = entry("4Item", itemTable, build::slot::ItemHoverText);
-    const auto text = entry("24MinecraftUIRenderContext", uiTable, build::slot::UiDrawText);
-    for (const auto address : {tick, render, heartTick, heartRender, delegate, hover, text})
-        if (!contains(address, 4, PF_R | PF_X)) return false;
-    const auto lookup = branch(tick + build::call::TickAttributeLookup);
-    const auto current = branch(tick + build::call::TickAttributeCurrent);
-    const auto batch = branch(render + build::call::RenderBatch);
-    const auto meshValid = branch(render + build::call::RenderMeshValid);
-    const auto position = branch(render + build::call::RenderPosition);
-    const auto maximum = branch(heartTick + build::call::HeartTickMaximum);
-    const auto hasEffect = branch(heartTick + build::call::HeartTickHasEffect);
-    const auto level = branch(delegate + build::call::DelegateLevel);
-    const auto gameRule = branch(delegate + build::call::DelegateGameRule);
-    const auto component = branch(delegate + build::call::DelegateExhaustionComponent);
-    if (!lookup || !current || !batch || !meshValid || !position || !maximum ||
-        !hasEffect || !level || !gameRule || !component) return false;
-    const auto hunger = addressPair(tick + build::call::TickHungerKey, 1);
-    const auto saturation = addressPair(tick + build::call::TickSaturationKey, 1);
-    const auto health = addressPair(heartTick + build::call::HeartTickHealthKey, 1);
-    if (!hunger || !saturation || !health || hunger == saturation || hunger == health || saturation == health) return false;
-    const auto exhaustion = saturation + build::field::SaturationToExhaustion;
-    if (!contains(exhaustion, 8, PF_R) || exhaustion == hunger || exhaustion == health) return false;
-    if (lookup != branch(tick + build::call::TickSecondLookup) ||
-        lookup != branch(heartTick + build::call::HeartTickLookup) ||
-        current != branch(tick + build::call::TickSecondCurrent) ||
-        current != branch(heartTick + build::call::HeartTickCurrent) ||
-        batch != branch(render + build::call::RenderBatchSecond) ||
-        batch != branch(heartRender + build::call::HeartRenderBatch) ||
-        batch != branch(heartRender + build::call::HeartRenderBatchSecond) ||
-        meshValid != branch(heartRender + build::call::HeartRenderMeshValid) ||
-        position != branch(heartRender + build::call::HeartRenderPosition) ||
-        hasEffect != branch(heartTick + build::call::HeartTickHasEffectSecond) ||
-        level != branch(delegate + build::call::DelegateLevelSecond)) return false;
+    const auto belongs = [](std::uintptr_t address, std::uintptr_t method, std::size_t limit) {
+        return address >= method && address - method < limit;
+    };
+    if (!belongs(at[HungerHeader], entry(hungerTable, build::slot::HungerRender), 0x80) ||
+        !belongs(at[HeartHeader], entry(heartTable, build::slot::HeartRender), 0x80) ||
+        !belongs(at[HungerRead], entry(hungerTable, build::slot::HungerTick), 0x1000) ||
+        !belongs(at[SaturationRead], entry(hungerTable, build::slot::HungerTick), 0x1000) ||
+        !belongs(at[HealthRead], entry(heartTable, build::slot::HeartTick), 0x4000)) {
+        __android_log_print(ANDROID_LOG_ERROR, "AppleSkin", "Native render vtable does not match signatures");
+        return false;
+    }
+    const auto instruction = [&](std::uintptr_t address) {
+        return contains(address, 4, PF_R | PF_X) ? read<std::uint32_t>(reinterpret_cast<void*>(address), 0) : 0u;
+    };
+    const auto immediate = [&](std::uintptr_t address, std::uint32_t opcode, std::size_t scale, std::size_t value) {
+        const auto word = instruction(address);
+        return (word & 0xffc00000u) == opcode && ((word >> 10) & 0xfffu) * scale == value;
+    };
+    const auto lookup = branch(at[HungerRead] + 16);
+    const auto current = branch(at[HungerRead] + 20);
+    const auto maximum = branch(at[HealthRead] + 60);
+    const auto meshValid = branch(at[MeshRead] + 20);
+    const auto position = branch(at[PositionRead] + 4);
+    const auto batch = branch(at[BatchRead] + 36);
+    const auto effect = branch(at[EffectRead] + 8);
+    const auto level = branch(at[LevelRead] + 4);
+    const auto rule = branch(at[RuleRead] + 32);
+    const auto component = branch(at[ComponentRead] + 4);
+    const auto fontDraw = branch(at[NativeText] + 40);
+    for (const auto address : {lookup, current, maximum, meshValid, position, batch, effect, level, rule, component, fontDraw})
+        if (!address) return false;
+    if (lookup != branch(at[SaturationRead] + 16) || current != branch(at[SaturationRead] + 20) ||
+        lookup != branch(at[HealthRead] + 12) || current != branch(at[HealthRead] + 48) ||
+        level != branch(at[RuleRead] + 8)) return false;
+    const auto hunger = addressPair(at[HungerRead], 1);
+    const auto saturation = addressPair(at[SaturationRead], 1);
+    const auto health = addressPair(at[HealthRead], 1);
+    const auto exhaustion = addressPair(at[ExhaustionRead], 1);
+    std::array keys{hunger, saturation, health, exhaustion};
+    std::sort(keys.begin(), keys.end());
+    if (!keys.front() || std::adjacent_find(keys.begin(), keys.end()) != keys.end()) return false;
+    const auto screen = branch(at[MeshRead] + 4);
+    const bool layout =
+        immediate(at[HungerHeader], 0x39400000u, 1, build::field::RendererVisible) &&
+        immediate(at[HungerHeader] + 8, 0x91000000u, 1, build::field::RendererTextures) &&
+        immediate(at[HungerHeader] + 32, 0xf9400000u, 8, build::field::TextureGpuPointer) &&
+        immediate(at[HungerHeader] + 52, 0x91000000u, 1, build::field::TextureGpuReady) &&
+        immediate(at[MeshRead] + 8, 0x91000000u, 1, build::field::RendererMeshes) &&
+        immediate(at[HungerLayout] + 20, 0x91000000u, 1, build::field::RendererPositions) &&
+        ((instruction(at[HungerLayout] + 12) >> 5) & 0xffffu) == build::field::MeshStride &&
+        immediate(at[BatchRead], 0x39400000u, 1, build::field::RendererHungerEffect) &&
+        immediate(at[BatchRead] + 4, 0xbd400000u, 4, build::field::RendererAlpha) &&
+        instruction(at[BatchRead] + 32) == 0xaa1f03e5u &&
+        immediate(at[HeartHeader], 0x39400000u, 1, build::field::HeartVisible) &&
+        immediate(at[HeartHeader] + 8, 0x91000000u, 1, build::field::HeartTextures) &&
+        immediate(at[HeartMesh], 0x91000000u, 1, build::field::HeartMeshes) &&
+        immediate(at[HeartMesh] + 28, 0x91000000u, 1, build::field::MeshStride) &&
+        immediate(at[HeartLayout] + 20, 0xf9400000u, 8, build::field::HeartPositions) &&
+        immediate(at[HeartLayout] + 24, 0xf9400000u, 8, build::field::HeartPositionsEnd) &&
+        immediate(at[PlayerRead] + 8, 0xf9400000u, 8, build::slot::LocalPlayer * 8) &&
+        immediate(at[OptionsRead] + 4, 0xf9400000u, 8, build::slot::ClientOptions * 8) &&
+        immediate(at[OptionsRead] + 20, 0xf9400000u, 8, build::slot::OptionsUiProfile * 8) &&
+        immediate(at[LevelRead] + 12, 0xf9400000u, 8, build::slot::LevelDifficulty * 8) &&
+        immediate(at[RuleRead] + 16, 0xf9400000u, 8, build::slot::LevelGameRules * 8) &&
+        ((instruction(at[RuleRead] + 24) >> 5) & 0xffffu) == build::rule::NaturalRegeneration &&
+        immediate(current, 0xbd400000u, 4, 0x7c) &&
+        immediate(maximum, 0xbd400000u, 4, 0x78) &&
+        immediate(screen, 0xf9400000u, 8, build::field::UiScreen) &&
+        immediate(entry(itemTable, build::slot::ItemFood), 0xf9400000u, 8, 0x180);
+    if (!layout) {
+        __android_log_print(ANDROID_LOG_ERROR, "AppleSkin", "Native layout does not match Minecraft 26.60");
+        return false;
+    }
     Targets result;
-    result.hunger = reinterpret_cast<void*>(render);
-    result.heart = reinterpret_cast<void*>(heartRender);
-    result.hover = reinterpret_cast<void*>(hover);
-    result.text = reinterpret_cast<void*>(text);
+    result.hunger = reinterpret_cast<void*>(entry(hungerTable, build::slot::HungerRender));
+    result.heart = reinterpret_cast<void*>(entry(heartTable, build::slot::HeartRender));
+    result.hover = reinterpret_cast<void*>(entry(itemTable, build::slot::ItemHoverText));
+    result.text = reinterpret_cast<void*>(entry(uiTable, build::slot::UiDrawText));
+    result.textView = reinterpret_cast<void*>(entry(uiTable, build::slot::UiDrawTextView));
+    result.fontDraw = reinterpret_cast<void*>(fontDraw);
+    result.finish = reinterpret_cast<void*>(entry(uiTable, build::slot::UiFinish));
     result.lookup = reinterpret_cast<LookupFn>(lookup);
     result.value = reinterpret_cast<AttributeValueFn>(current);
     result.maximum = reinterpret_cast<AttributeValueFn>(maximum);
     result.meshValid = reinterpret_cast<MeshValidFn>(meshValid);
     result.position = reinterpret_cast<ControlPositionFn>(position);
     result.batch = reinterpret_cast<BatchFn>(batch);
-    result.hasEffect = reinterpret_cast<HasEffectFn>(hasEffect);
+    result.hasEffect = reinterpret_cast<HasEffectFn>(effect);
     result.level = reinterpret_cast<ActorLevelFn>(level);
-    result.gameRule = reinterpret_cast<GameRuleFn>(gameRule);
+    result.gameRule = reinterpret_cast<GameRuleFn>(rule);
     result.exhaustionComponent = reinterpret_cast<ExhaustionComponentFn>(component);
     result.hungerKey = reinterpret_cast<void*>(hunger);
     result.saturationKey = reinterpret_cast<void*>(saturation);

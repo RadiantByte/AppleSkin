@@ -14,11 +14,11 @@ AppleSkin is an open-source native mod for Minecraft Bedrock on Android, made fo
 
 - Android 9 or newer and a 64-bit ARM device (`arm64-v8a`)
 - [LeviLauncher](https://github.com/LiteLDev/LeviLaunchroid) to load the mod
-- Minecraft Bedrock **26.52**
+- Minecraft Bedrock **26.60**
 
 ## Installation
 
-1. Install LeviLauncher and import Minecraft 26.52.
+1. Install LeviLauncher.
 2. Import `AppleSkin.levipack` through the launcher's mod manager and enable it.
 3. Launch Minecraft through LeviLauncher.
 

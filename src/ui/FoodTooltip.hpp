@@ -18,6 +18,7 @@ struct TooltipRows {
 };
 void appendFoodTooltip(const void* stack, RedactableText* text);
 TooltipRows captureTooltipRows(void* context, void* font, const Rect& rectangle,
-    const std::string& text, int alignment, const TextStyle& style);
+    std::string_view text, int alignment, const TextStyle& style);
+TooltipRows captureFontTooltipRows(void* font, std::string_view text, float x, float y);
 void renderTooltipRows(void* context, const TooltipRows& rows, float alpha);
 }

@@ -7,7 +7,6 @@ namespace appleskin {
 class Host {
 public:
     bool connect();
-    VtableLookupFn vtableResolver() const;
     bool install(void* target, void* replacement, void** continuation);
     bool removeAll();
 private:
@@ -17,7 +16,6 @@ private:
     void* handle{};
     Hook hook{};
     Unhook unhook{};
-    VtableLookupFn resolveVtable{};
     std::vector<Entry> entries;
 };
 }

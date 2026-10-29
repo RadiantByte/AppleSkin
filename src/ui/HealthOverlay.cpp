@@ -41,7 +41,7 @@ void renderHealthOverlay(void* renderer, void* context, void* control, const Tar
         const auto mesh = base + build::field::HeartMeshes + type * build::field::MeshStride;
         const auto texture = base + build::field::HeartTextures + type * build::field::TextureStride;
         if (textureReady(read<const void*>(texture, 0)) && targets.meshValid(mesh))
-            targets.batch(screen, mesh, texture, size, positions, pulse);
+            targets.batch(screen, mesh, texture, size, positions, pulse, nullptr);
     };
     submit(read<int>(renderer, build::field::HeartFullType), full.data(), fullCount);
     submit(read<int>(renderer, build::field::HeartHalfType), half.data(), halfCount);

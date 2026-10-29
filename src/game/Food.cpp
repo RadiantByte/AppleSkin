@@ -65,9 +65,7 @@ HealthPreview healthPreview(const HungerState& state, const Targets& targets, bo
     if (rules && !targets.gameRule(rules, build::rule::NaturalRegeneration, true)) return {};
     for (const auto effect : {19, 20, 25})
         if (targets.hasEffect(state.player, effect)) return {};
-    const auto registry = read<const void*>(state.player, build::field::ActorRegistry);
-    const auto component = registry ? targets.exhaustionComponent(registry,
-        read<std::uint32_t>(state.player, build::field::ActorIdentifier)) : nullptr;
+    const auto component = targets.exhaustionComponent(state.player);
     const auto nativeCost = component ? read<float>(component, build::field::ExhaustionHeal) : -1.0f;
     const auto cost = within(nativeCost, 0, 100000) ? nativeCost : 6.0f;
     const auto exhaustionMaximum = state.hasExhaustion && state.exhaustionMaximum > 0 ? state.exhaustionMaximum : 20.0f;
