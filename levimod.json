@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "id": "appleskin",
+  "version": "1.1.0",
+  "minecraft_versions": [
+    "1.26.60.X"
+  ],
+  "info": {
+    "name": "AppleSkin",
+    "author": "TheRealBatu & MrPokeG",
+    "description": "Pulsing food and healing previews, saturation outlines, optional exhaustion, food tooltips.",
+    "homepage_url": "https://github.com/RadiantByte/AppleSkin",
+    "icon": "assets/icon.png",
+    "tags": [
+      "Utility"
+    ]
+  },
+  "release_assets": {
+    "include": [
+      "*.levipack",
+      "*.so"
+    ],
+    "labels": {
+      "AppleSkin.levipack": "LeviPack",
+      "libappleskin.so": "Native library"
+    }
+  }
+}
